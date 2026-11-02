@@ -1,0 +1,29 @@
+{
+  "name": "asistente-reuniones",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Asistente de reuniones de Mara (Bondy / Schmitman HR). Se une a Google Meet y responde en el chat con datos de Airtable.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "asistente": "tsx src/cli.ts",
+    "login": "tsx src/cli.ts login",
+    "sync": "tsx src/cli.ts sync",
+    "join": "tsx src/cli.ts join",
+    "serve": "tsx src/cli.ts serve",
+    "ask": "tsx src/cli.ts ask",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "playwright": "^1.49.1",
+    "tsx": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
