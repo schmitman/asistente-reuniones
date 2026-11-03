@@ -44,6 +44,7 @@ const HISTORICO_FIELDS = [
   'English Level',
   'Status',
   'Position name',
+  'Position Name (from Position on Job Board)',
   'Country',
   'Clausula Datos',
 ];

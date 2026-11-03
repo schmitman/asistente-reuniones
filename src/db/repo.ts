@@ -22,8 +22,8 @@ export function replaceBase(db: DatabaseSync, baseKey: string, records: MappedCa
       id, base_key, record_id, display_name, seniority_raw, seniority, seniority_rank,
       english_raw, english, english_rank, area, area_norm, status, status_norm,
       years_experience, position_name, position_norm, profile_text, profile_norm,
-      country, country_norm, data_share_ok, skills_preview, search_text, synced_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      country, country_norm, data_share_ok, skills_preview, search_text, skill_tags, skill_text, synced_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertSkill = db.prepare(
     `INSERT OR IGNORE INTO candidate_skills (candidate_id, skill, source) VALUES (?, ?, ?)`,
@@ -79,6 +79,8 @@ export function replaceBase(db: DatabaseSync, baseKey: string, records: MappedCa
         record.dataShareOk ? 1 : 0,
         record.skillsPreview,
         search,
+        record.skillTags ?? '',
+        record.skillText ?? '',
         syncedAt,
       );
       for (const item of skills) insertSkill.run(id, item.skill, item.source);

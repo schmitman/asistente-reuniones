@@ -1,15 +1,12 @@
 import type { DomCaption, DomChatMessage } from './controller.js';
 
-function clean(value: string | null | undefined): string {
-  return (value || '').replace(/\s+/g, ' ').trim();
-}
-
 export function scrapeChatInPage(): DomChatMessage[] {
+  const clean = (value: string | null | undefined): string => (value || '').replace(/\s+/g, ' ').trim();
   const textOf = (element: Element | null): string => clean(element?.textContent);
   const out: DomChatMessage[] = [];
   const seen = new Set<string>();
   const push = (id: string, sender: string, message: string) => {
-    const text = clean(message);
+    const text = clean(message).replace(/\s*(?:keep)?\s*(?:Fijar mensaje|Pin message)$/i, '').trim();
     if (!text) return;
     const key = id || `${sender}|${text}`;
     if (seen.has(key)) return;
@@ -45,6 +42,7 @@ export function scrapeChatInPage(): DomChatMessage[] {
 }
 
 export function scrapeCaptionInPage(): DomCaption | null {
+  const clean = (value: string | null | undefined): string => (value || '').replace(/\s+/g, ' ').trim();
   const root =
     document.querySelector('.a4cQT') ||
     document.querySelector('[jsname="dsyhDe"]') ||

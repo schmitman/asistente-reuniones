@@ -64,16 +64,20 @@ class PlaywrightMeetSession implements MeetController {
     } catch (error) {
       throw explainLaunchError(error);
     }
+    await this.context.addInitScript('globalThis.__name = globalThis.__name || ((f) => f);');
     this.page = this.context.pages()[0] ?? (await this.context.newPage());
+    await this.page.evaluate('globalThis.__name = globalThis.__name || ((f) => f);').catch(() => {});
   }
 
   async join(url: string): Promise<void> {
     const page = this.requiredPage();
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60_000 });
+    await waitForPrejoin(page);
     await dismissInterstitials(page);
     await fillGuestName(page, this.config.displayName);
     await muteDevices(page);
     await clickJoin(page);
+    await page.screenshot({ path: 'logs/after-click.png' }).catch(() => undefined);
     await dismissInterstitials(page);
     await waitUntilAdmitted(page, this.config.admissionTimeoutMs);
     await openChat(page);
@@ -91,9 +95,7 @@ class PlaywrightMeetSession implements MeetController {
     } catch {
       await page.keyboard.insertText(text);
     }
-    const send = page.locator('button[aria-label*="Enviar" i], button[aria-label*="Send" i]').first();
-    if (await send.isVisible().catch(() => false)) await send.click();
-    else await input.press('Enter');
+    await input.press('Enter');
   }
 
   async scrapeChat(): Promise<DomChatMessage[]> {
@@ -116,6 +118,18 @@ class PlaywrightMeetSession implements MeetController {
     if (!this.page) throw new Error('El navegador no está abierto.');
     return this.page;
   }
+}
+
+async function waitForPrejoin(page: Page): Promise<void> {
+  // Meet renders the pre-join screen well after DOMContentLoaded.
+  await page
+    .locator(
+      'input[aria-label*="nombre" i], input[aria-label*="name" i], input[placeholder*="nombre" i], input[placeholder*="name" i], button:has-text("Unirse"), button:has-text("Solicitar"), button:has-text("Pedir"), button:has-text("Join"), button:has-text("Ask to join"), button:has-text("Cambiar aquí"), button:has-text("Switch here")',
+    )
+    .first()
+    .waitFor({ state: 'visible', timeout: 45_000 })
+    .catch(() => undefined);
+  await page.waitForTimeout(2500);
 }
 
 async function dismissInterstitials(page: Page): Promise<void> {
@@ -171,6 +185,9 @@ async function waitUntilAdmitted(page: Page, timeoutMs: number): Promise<void> {
       .count()
       .catch(() => 0);
     if (denied > 0) {
+      await page.screenshot({ path: 'logs/denied.png' }).catch(() => undefined);
+      const txt = await page.locator('body').innerText().catch(() => '');
+      console.log('[meet] pantalla al rechazar:\n' + txt.slice(0, 1500));
       throw new Error('El anfitrión no admitió al asistente o esta reunión no deja entrar.');
     }
     if (await page.locator(LEAVE_SELECTOR).first().isVisible().catch(() => false)) return;
@@ -191,7 +208,12 @@ async function openChat(page: Page): Promise<void> {
       ].join(', '),
     )
     .first();
-  if (await chat.isVisible().catch(() => false)) await chat.click();
+  for (const name of ['Entendido', 'Got it', 'Cerrar', 'Close', 'Descartar', 'Dismiss']) {
+    const b = page.getByRole('button', { name, exact: true }).first();
+    if (await b.isVisible().catch(() => false)) await b.click({ timeout: 2000 }).catch(() => undefined);
+  }
+  await page.keyboard.press('Escape').catch(() => undefined);
+  if (await chat.isVisible().catch(() => false)) await chat.click({ force: true, timeout: 5000 }).catch(() => undefined);
   await page.locator(CHAT_INPUT).first().waitFor({ state: 'visible', timeout: 10_000 }).catch(() => undefined);
 }
 

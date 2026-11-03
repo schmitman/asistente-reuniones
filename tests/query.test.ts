@@ -3,7 +3,8 @@ import { mapRecord } from '../src/airtable/mapRecord.js';
 import { replaceBase } from '../src/db/repo.js';
 import { openDatabase } from '../src/db/database.js';
 import { answerFromCache, filtersFromQuestion } from '../src/llm/fallback.js';
-import { countCandidates, searchCandidates } from '../src/query/candidates.js';
+import { countCandidates, matchProfiles, searchCandidates } from '../src/query/candidates.js';
+import { buildSkillQuery, cleanSkillTerm, tokenizeForMatch } from '../src/query/skillMatch.js';
 import { canonicalSkill, extractSkillKeys } from '../src/query/normalize.js';
 
 function seed() {
@@ -83,11 +84,12 @@ describe('skills', () => {
 });
 
 describe('consultas al cache', () => {
-  it('java no incluye javascript y react no incluye react native', () => {
+  it('java no incluye javascript; react incluye react native como en Airtable', () => {
     const db = seed();
     expect(countCandidates(db, { skills: ['java'] }).total).toBe(1);
     expect(countCandidates(db, { skills: ['javascript'] }).total).toBe(1);
-    expect(countCandidates(db, { skills: ['react'] }).total).toBe(1);
+    expect(countCandidates(db, { skills: ['react'] }).total).toBe(2);
+    expect(countCandidates(db, { skills: ['ReactJS'] }).total).toBe(2);
     expect(countCandidates(db, { skills: ['react native'] }).total).toBe(1);
     expect(countCandidates(db, { skills: ['go'] }).total).toBe(1);
     expect(countCandidates(db, { skills: ['google cloud'] }).total).toBe(1);
@@ -102,7 +104,7 @@ describe('consultas al cache', () => {
     expect(countCandidates(db, { skills: ['java'], bases: ['general', 'historico'] }).total).toBe(2);
     expect(countCandidates(db, { skills: ['java', 'spring'], skillMode: 'all' }).total).toBe(1);
     expect(countCandidates(db, { skills: ['java', 'react'], skillMode: 'all' }).total).toBe(0);
-    expect(countCandidates(db, { skills: ['java', 'react'], skillMode: 'any' }).total).toBe(2);
+    expect(countCandidates(db, { skills: ['java', 'react'], skillMode: 'any' }).total).toBe(3);
   });
 
   it('en modo nombres oculta contacto y respeta la cláusula de datos', () => {
@@ -123,16 +125,59 @@ describe('consultas al cache', () => {
       skills: ['java'],
       seniority: ['senior'],
       minEnglish: 'advanced',
-      bases: ['general'],
+      bases: ['general', 'historico'],
     });
     const answer = answerFromCache('cuántos java senior hay', db, 'counts', 5, true);
-    expect(answer).toMatch(/Hay 1 perfil/);
+    expect(answer).toMatch(/Criterio: skills Java/);
+    expect(answer).toMatch(/Base general: 1 \(1 con seniority Senior\)/);
+    expect(answer).toMatch(/Base histórica: 1/);
     expect(answer).not.toMatch(/Ada|@|5555|hunter2/);
     const named = answerFromCache('cuántos java senior hay', db, 'names', 5, true);
     expect(named).toMatch(/Ada López/);
     expect(named).not.toMatch(/@|5555|hunter2/);
-    const hidden = answerFromCache('cuántos react hay', db, 'names', 5, true);
+    const hidden = answerFromCache('cuántos javascript hay en la base general', db, 'names', 5, true);
     expect(hidden).toMatch(/cláusula de datos/);
     expect(hidden).not.toMatch(/Teo/);
+  });
+});
+
+describe('matching estilo Airtable', () => {
+  it('saca palabras de rol y reconoce variantes', () => {
+    expect(cleanSkillTerm('Senior Python engineer')).toBe('python');
+    expect(cleanSkillTerm('React.js developer')).toBe('react js');
+    expect(buildSkillQuery('React.js developer')?.canonical).toBe('react');
+    expect(buildSkillQuery('NodeJS')?.canonical).toBe('node');
+    expect(buildSkillQuery('TS')?.canonical).toBe('typescript');
+    expect(buildSkillQuery('Mongo')?.canonical).toBe('mongodb');
+    expect(buildSkillQuery('senior engineer')).toBeNull();
+    expect(tokenizeForMatch('Node.JS, Mongó;  C# y C++')).toBe(' node js mongo c# y c++ ');
+  });
+
+  it('busca en todos los campos de skills y trata seniority como filtro blando', () => {
+    const db = openDatabase(':memory:');
+    replaceBase(db, 'general', [
+      mapRecord('general', { id: 'recPy0000000001a', fields: { 'Skills 2': ['Python'], Seniority: 'Sr' } }),
+      mapRecord('general', { id: 'recPy0000000002a', fields: { 'Skills (AI Internet)': ['Python 3'], Seniority: 'JR' } }),
+      mapRecord('general', { id: 'recPy0000000003a', fields: { 'Tech Skills': 'Armé un ETL con python y pandas.' } }),
+      mapRecord('general', { id: 'recPy0000000004a', fields: { Profile: ['Python Developer'], 'English Level': 'Advanced' } }),
+      mapRecord('general', { id: 'recPy0000000005a', fields: { 'Position Name (from Position on Job Board)': ['Backend Python Sr'] } }),
+      mapRecord('general', { id: 'recNode00000001a', fields: { 'Skills ': 'Node.js, TypeScript, MongoDB', Seniority: 'Sr' } }),
+      mapRecord('general', { id: 'recNode00000002a', fields: { 'Skills 2': ['NodeJS', 'TS'], 'Skills (AI Internet)': ['Mongo'] } }),
+      mapRecord('general', { id: 'recGoVerb000001a', fields: { 'Tech Skills': 'I had to go and fix it' } }),
+    ]);
+    replaceBase(db, 'historico', [
+      mapRecord('historico', { id: 'recHistPy000001a', fields: { 'Skills 2': 'Django, Python', Seniority: 'Senior' } }),
+    ]);
+    const python = matchProfiles(db, { skills: ['Senior Python engineer'], minSeniority: 'senior' });
+    expect(python.skills).toEqual(['Python']);
+    expect(python.bases.find((base) => base.base === 'general')?.total).toBe(5);
+    expect(python.bases.find((base) => base.base === 'general')?.refined).toBe(1);
+    expect(python.bases.find((base) => base.base === 'historico')?.total).toBe(1);
+    expect(python.resumen).toMatch(/^Criterio: skills Python\./);
+
+    const node = matchProfiles(db, { skills: ['Node.js', 'TypeScript', 'MongoDB'], minYears: 7 });
+    expect(node.bases.find((base) => base.base === 'general')?.total).toBe(2);
+    expect(node.criterio).toMatch(/Node\.js \+ TypeScript \+ MongoDB/);
+    expect(matchProfiles(db, { skills: ['go'] }).bases[0]?.total).toBe(0);
   });
 });

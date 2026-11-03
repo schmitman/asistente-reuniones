@@ -2,12 +2,12 @@ import type { DatabaseSync } from 'node:sqlite';
 import {
   canonicalizeEnglish,
   canonicalizeSeniority,
-  canonicalSkill,
   englishLabel,
   likeEscape,
   normalizeText,
   seniorityLabel,
 } from './normalize.js';
+import { buildSkillQuery, displaySkill, tokenizeForMatch, type SkillQuery } from './skillMatch.js';
 
 export type BaseKey = 'general' | 'historico';
 export type SkillMode = 'all' | 'any';
@@ -201,11 +201,7 @@ function buildWhere(filter: CandidateFilter): WhereClause {
   }
   if (filter.requireDataShare) clauses.push(`c.data_share_ok = 1`);
 
-  const skills = unique(
-    (filter.skills ?? [])
-      .map((value) => canonicalSkill(value))
-      .filter((value): value is string => Boolean(value)),
-  );
+  const skills = skillQueries(filter.skills ?? []);
   if (skills.length > 0) {
     const parts = skills.map((skill) => skillClause(skill, params));
     clauses.push(filter.skillMode === 'any' ? `(${parts.join(' OR ')})` : parts.join(' AND '));
@@ -214,35 +210,43 @@ function buildWhere(filter: CandidateFilter): WhereClause {
   return { sql: clauses.join(' AND '), params };
 }
 
-function skillClause(skill: string, params: Array<string | number>): string {
-  const allowWord = skill.length >= 3 ? 1 : 0;
-  const escaped = likeEscape(skill);
-  params.push(
-    skill,
-    allowWord,
-    `${escaped} %`,
-    `% ${escaped}`,
-    `% ${escaped} %`,
-    skill === 'react' ? 1 : 0,
-    skill === 'java' ? 1 : 0,
-  );
-  return `EXISTS (
-    SELECT 1 FROM candidate_skills s
-    WHERE s.candidate_id = c.id
-      AND (
-        s.skill = ?
-        OR (
-          ? = 1
-          AND (
-            s.skill LIKE ? ESCAPE '\\'
-            OR s.skill LIKE ? ESCAPE '\\'
-            OR s.skill LIKE ? ESCAPE '\\'
-          )
-          AND NOT (? = 1 AND s.skill LIKE '%native%')
-          AND NOT (? = 1 AND (s.skill = 'javascript' OR s.skill LIKE 'javascript %' ESCAPE '\\'))
-        )
-      )
-  )`;
+/** Skills limpios y sin repetir. "Senior Python engineer" queda como Python. */
+export function skillQueries(values: string[]): SkillQuery[] {
+  const seen = new Set<string>();
+  const result: SkillQuery[] = [];
+  for (const value of values) {
+    const query = buildSkillQuery(value);
+    if (!query || seen.has(query.canonical)) continue;
+    seen.add(query.canonical);
+    result.push(query);
+  }
+  return result;
+}
+
+/**
+ * Un skill matchea si alguna variante aparece como palabra en Skills 2, Skills (AI Internet),
+ * Skills, Profile o el puesto (skill_tags), o en Tech Skills (skill_text).
+ * Las variantes cortas o ambiguas (go, ts, js, ui…) solo se buscan en los campos estructurados.
+ */
+function skillClause(skill: SkillQuery, params: Array<string | number>): string {
+  const ors: string[] = [];
+  for (const variant of skill.textVariants) {
+    const pattern = `% ${likeEscape(variant)} %`;
+    ors.push(`c.skill_tags LIKE ? ESCAPE '\\'`, `c.skill_text LIKE ? ESCAPE '\\'`);
+    params.push(pattern, pattern);
+  }
+  for (const variant of skill.tagVariants) {
+    ors.push(`c.skill_tags LIKE ? ESCAPE '\\'`);
+    params.push(`% ${likeEscape(variant)} %`);
+  }
+  return ors.length > 0 ? `(${ors.join(' OR ')})` : '0';
+}
+
+function pushTokens(clauses: string[], params: Array<string | number>, value: string | undefined): void {
+  const tokens = value ? tokenizeForMatch(value).trim() : '';
+  if (!tokens) return;
+  clauses.push(`(c.skill_tags LIKE ? ESCAPE '\\' OR c.search_text LIKE ? ESCAPE '\\')`);
+  params.push(`% ${likeEscape(tokens)} %`, `%${likeEscape(normalizeText(value ?? ''))}%`);
 }
 
 function pushContains(
@@ -286,4 +290,185 @@ function publicFilter(filter: CandidateFilter): CandidateFilter {
     minYears: filter.minYears,
     maxYears: filter.maxYears,
   };
+}
+
+/* ------------------------------------------------------------------------- */
+/* Matching "estilo Airtable": skills obligatorios + filtros blandos.          */
+/* ------------------------------------------------------------------------- */
+
+export interface BaseMatch {
+  base: BaseKey;
+  baseName: string;
+  /** Perfiles que tienen todos los skills obligatorios (más filtros duros como área o país). */
+  total: number;
+  bySeniority: Record<string, number>;
+  byEnglish: Record<string, number>;
+  /** Cuántos de esos además cumplen los filtros blandos (seniority, inglés, rol). */
+  refined: number | null;
+  /** Cuántos tienen cargados los años pedidos (el campo está vacío en la mayoría). */
+  withYears: number | null;
+}
+
+export interface ProfileMatch {
+  criterio: string;
+  skills: string[];
+  skillMode: SkillMode;
+  softFilters: string[];
+  yearsNote: string | null;
+  bases: BaseMatch[];
+  resumen: string;
+}
+
+// Ojo: "2020-2021" lo tapa el filtro de teléfonos, por eso se dice "histórica".
+const BASE_NAMES: Record<BaseKey, string> = { general: 'base general', historico: 'base histórica' };
+
+/**
+ * Cuenta como Mara buscaría en Airtable: los skills son obligatorios y se buscan con variantes
+ * en todos los campos de skills; seniority, inglés, años y rol son filtros blandos que se informan
+ * aparte (no achican el total). Por defecto mira las dos bases.
+ */
+export function matchProfiles(db: DatabaseSync, filter: CandidateFilter = {}): ProfileMatch {
+  const skills = skillQueries(filter.skills ?? []);
+  const skillMode: SkillMode = filter.skillMode === 'any' ? 'any' : 'all';
+  const bases: BaseKey[] = filter.bases && filter.bases.length > 0 ? filter.bases : ['general', 'historico'];
+  const hard: CandidateFilter = {
+    skills: skills.map((skill) => skill.canonical),
+    skillMode,
+    area: filter.area,
+    country: filter.country,
+    status: filter.status,
+  };
+  const soft: CandidateFilter = {
+    seniority: filter.seniority,
+    minSeniority: filter.minSeniority,
+    english: filter.english,
+    minEnglish: filter.minEnglish,
+  };
+  const years: CandidateFilter = { minYears: filter.minYears, maxYears: filter.maxYears };
+  const hasYears = filter.minYears != null || filter.maxYears != null;
+  const role = [filter.position, filter.profile, filter.text]
+    .map((value) => (value ? cleanRole(value) : ''))
+    .filter(Boolean)
+    .join(' ');
+  const softFilters = describeSoft(soft, role);
+  const hasSoft = softFilters.length > 0;
+  const yearsLabel = [
+    filter.minYears != null ? `${filter.minYears}+ años` : '',
+    filter.maxYears != null ? `hasta ${filter.maxYears} años` : '',
+  ]
+    .filter(Boolean)
+    .join(' y ');
+
+  const results: BaseMatch[] = bases.map((base) => {
+    const where = buildWhere({ ...hard, bases: [base] });
+    const total = Number(
+      (db.prepare(`SELECT COUNT(*) AS n FROM candidates c WHERE ${where.sql}`).get(...where.params) as { n: number })
+        .n,
+    );
+    let refined: number | null = null;
+    if (hasSoft) {
+      const refinedWhere = buildWhere({ ...hard, ...soft, bases: [base] });
+      const clauses = [refinedWhere.sql];
+      pushTokens(clauses, refinedWhere.params, role);
+      refined = Number(
+        (
+          db
+            .prepare(`SELECT COUNT(*) AS n FROM candidates c WHERE ${clauses.join(' AND ')}`)
+            .get(...refinedWhere.params) as { n: number }
+        ).n,
+      );
+    }
+    let withYears: number | null = null;
+    if (hasYears) {
+      const yearsWhere = buildWhere({ ...hard, ...years, bases: [base] });
+      withYears = Number(
+        (db.prepare(`SELECT COUNT(*) AS n FROM candidates c WHERE ${yearsWhere.sql}`).get(...yearsWhere.params) as {
+          n: number;
+        }).n,
+      );
+    }
+    return {
+      base,
+      baseName: BASE_NAMES[base],
+      total,
+      withYears,
+      bySeniority: total > 0 ? grouped(db, "COALESCE(seniority, '')", where, (key) => seniorityLabel(key || null, null)) : {},
+      byEnglish: total > 0 ? grouped(db, "COALESCE(english, '')", where, (key) => englishLabel(key || null) ?? '') : {},
+      refined,
+    };
+  });
+
+  const skillNames = skills.map((skill) => displaySkill(skill.canonical));
+  const joiner = skillMode === 'any' ? ' o ' : ' + ';
+  const criterio = [
+    skillNames.length > 0 ? `skills ${skillNames.join(joiner)}` : 'sin skills (todos los perfiles)',
+    filter.area ? `área ${filter.area}` : '',
+    filter.country ? `país ${filter.country}` : '',
+  ]
+    .filter(Boolean)
+    .join(', ');
+  return {
+    criterio: `${criterio}; busco en Skills 2, Skills (AI Internet), Skills, Tech Skills, Profile y puesto, con variantes`,
+    skills: skillNames,
+    skillMode,
+    softFilters,
+    bases: results,
+    yearsNote: yearsLabel ? `${yearsLabel}: se informa aparte, el campo de años está vacío en la mayoría de los perfiles` : null,
+    resumen: summarize(criterio, softFilters, results, yearsLabel),
+  };
+}
+
+function cleanRole(value: string): string {
+  const generic = new Set(['senior', 'sr', 'junior', 'jr', 'semi', 'ssr', 'engineer', 'developer', 'dev', 'desarrollador',
+    'programador', 'ingeniero', 'de', 'con', 'en', 'y', 'and', 'perfil', 'perfiles']);
+  return tokenizeForMatch(value)
+    .trim()
+    .split(' ')
+    .filter((token) => token && !generic.has(token))
+    .join(' ');
+}
+
+function describeSoft(soft: CandidateFilter, role: string): string[] {
+  const out: string[] = [];
+  const seniority = (soft.seniority ?? []).map((value) => seniorityLabel(canonicalizeSeniority(value).key, value)).filter(Boolean);
+  if (seniority.length > 0) out.push(`seniority ${seniority.join('/')}`);
+  const minSeniority = canonicalizeSeniority(soft.minSeniority);
+  if (minSeniority.key) out.push(`${seniorityLabel(minSeniority.key, null)} o más`);
+  const english = (soft.english ?? []).map((value) => englishLabel(canonicalizeEnglish(value).key) ?? value);
+  if (english.length > 0) out.push(`inglés ${english.join('/')}`);
+  const minEnglish = canonicalizeEnglish(soft.minEnglish);
+  if (minEnglish.key) out.push(`inglés ${englishLabel(minEnglish.key)} o más`);
+  if (role) out.push(`rol "${role}"`);
+  return out;
+}
+
+function topEntries(record: Record<string, number>, max: number, skip: string[] = []): string {
+  return Object.entries(record)
+    .filter(([key]) => !skip.includes(key))
+    .slice(0, max)
+    .map(([key, value]) => `${key} ${value}`)
+    .join(', ');
+}
+
+function summarize(criterio: string, softFilters: string[], results: BaseMatch[], yearsLabel: string): string {
+  const parts: string[] = [`Criterio: ${criterio}.`];
+  for (const result of results) {
+    let line = `${capitalize(result.baseName)}: ${result.total}`;
+    const extras: string[] = [];
+    if (result.refined != null) extras.push(`${result.refined} con ${softFilters.join(', ')}`);
+    if (result.withYears != null) extras.push(`${result.withYears} con ${yearsLabel} cargados`);
+    if (extras.length > 0) line += ` (${extras.join('; ')})`;
+    if (result.total > 0) {
+      const seniority = topEntries(result.bySeniority, 3, ['sin dato']);
+      const english = topEntries(result.byEnglish, 2, ['sin dato']);
+      const bits = [seniority ? `seniority: ${seniority}` : '', english ? `inglés: ${english}` : ''].filter(Boolean);
+      if (bits.length > 0) line += `; ${bits.join('; ')}`;
+    }
+    parts.push(`${line}.`);
+  }
+  return parts.join(' ');
+}
+
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }

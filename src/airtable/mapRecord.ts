@@ -1,6 +1,7 @@
 import type { BaseKey } from './sources.js';
 import { looksSensitive } from '../safety/redact.js';
 import { scrubFieldMap } from '../safety/fields.js';
+import { tokenizeForMatch } from '../query/skillMatch.js';
 
 export interface AirtableRecord {
   id: string;
@@ -27,6 +28,10 @@ export interface MappedCandidate {
   dataShareOk: boolean;
   skillRaws: SkillRaw[];
   skillsPreview: string;
+  /** Texto tokenizado de los campos estructurados de skills, perfil y puesto (para buscar). */
+  skillTags: string;
+  /** Texto tokenizado de los campos narrativos (Tech Skills). */
+  skillText: string;
 }
 
 const RECORD_ID = /^rec[A-Za-z0-9]{14}$/;
@@ -52,6 +57,18 @@ export function mapRecord(baseKey: BaseKey, record: AirtableRecord): MappedCandi
     .join(', ')
     .slice(0, 240);
 
+  const tagSources = [
+    pick(fields, 'Skills 2'),
+    pick(fields, 'Skills (AI Internet)'),
+    pick(fields, 'Skills '),
+    pick(fields, 'Skills'),
+    pick(fields, 'Profile'),
+    pick(fields, 'Position name'),
+    pick(fields, 'Position Name (from Position on Job Board)'),
+  ];
+  const skillTags = tokenizeForMatch(tagSources.flatMap((value) => searchableList(value)).join(' , '));
+  const skillText = tokenizeForMatch(searchableList(pick(fields, 'Tech Skills')).join(' , '));
+
   return {
     baseKey,
     recordId: record.id,
@@ -67,6 +84,8 @@ export function mapRecord(baseKey: BaseKey, record: AirtableRecord): MappedCandi
     dataShareOk: asConsent(pick(fields, 'Clausula Datos')),
     skillRaws,
     skillsPreview: preview,
+    skillTags,
+    skillText,
   };
 }
 
@@ -133,4 +152,17 @@ function asConsent(value: unknown): boolean {
     .toLowerCase()
     .trim();
   return ['true', 'si', 'yes', '1', 'checked', 'x'].includes(token);
+}
+
+const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const URL_RE = /\b(?:https?:\/\/|www\.)\S+/gi;
+const LONG_DIGITS_RE = /\+?\d[\d\s().-]{7,}\d/g;
+
+/** Valores completos (sin recorte de largo) para buscar, sin mails, links, teléfonos ni ids de registro. */
+function searchableList(value: unknown): string[] {
+  return toStringList(value)
+    .filter((item) => !RECORD_ID.test(item.trim()))
+    .map((item) => item.replace(EMAIL_RE, ' ').replace(URL_RE, ' ').replace(LONG_DIGITS_RE, ' '))
+    .map((item) => item.slice(0, 8000))
+    .filter((item) => item.trim());
 }

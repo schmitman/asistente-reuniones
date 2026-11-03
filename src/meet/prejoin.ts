@@ -5,6 +5,8 @@ const JOIN_PRIORITY = [
   'request to join',
   'unirse ahora',
   'join now',
+  'cambiar aquí',
+  'switch here',
 ];
 
 export function buttonWantsDeviceOff(ariaLabel: string | null | undefined): boolean {
