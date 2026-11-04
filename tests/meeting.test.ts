@@ -61,7 +61,8 @@ describe('reunión', () => {
     ];
     await runtime.pollOnce();
     expect(meet.posted).toHaveLength(1);
-    expect(meet.posted[0]).toMatch(/Hay 1 perfil/);
+    expect(meet.posted[0]).toMatch(/Criterio: skills Java/);
+    expect(meet.posted[0]).toMatch(/Base general: 1/);
     expect(meet.posted[0]).not.toMatch(/Ada|@|5555|hunter2/);
 
     advance(4000);

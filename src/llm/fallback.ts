@@ -1,8 +1,8 @@
 import type { DatabaseSync } from 'node:sqlite';
 import type { ChatDetailLevel } from '../config.js';
 import type { BaseKey, CandidateFilter } from '../query/candidates.js';
-import { countCandidates, searchCandidates } from '../query/candidates.js';
-import { canonicalSkill, englishLabel, normalizeText } from '../query/normalize.js';
+import { matchProfiles, searchCandidates } from '../query/candidates.js';
+import { canonicalSkill, normalizeText } from '../query/normalize.js';
 
 const STOP = new Set([
   'cuantos',
@@ -84,9 +84,9 @@ const PHRASES = ['react native', 'machine learning', 'spring boot', 'ruby on rai
 
 export function filtersFromQuestion(question: string): CandidateFilter {
   const text = normalizeText(question);
-  let bases: BaseKey[] = ['general'];
-  if (/histor/.test(text) && /general/.test(text)) bases = ['general', 'historico'];
-  else if (/histor/.test(text)) bases = ['historico'];
+  let bases: BaseKey[] = ['general', 'historico'];
+  if (/histor|2020/.test(text) && !/general/.test(text)) bases = ['historico'];
+  else if (/\bbase general\b|\bsolo (?:la )?general\b/.test(text) && !/histor/.test(text)) bases = ['general'];
 
   const seniority: string[] = [];
   if (/semi\s*senior\s*\+|semisr\+/.test(text)) seniority.push('semi-senior-plus');
@@ -147,24 +147,14 @@ export function answerFromCache(
   if ((filter.skills?.length ?? 0) === 0 && (filter.seniority?.length ?? 0) === 0 && !filter.minEnglish) {
     return 'Decime el skill, el seniority o el inglés y lo busco en la base. Por ejemplo: cuántos Java senior hay.';
   }
-  const count = countCandidates(db, filter);
-  const baseLabel = (filter.bases ?? ['general']).map(baseName).join(' y ');
-  if (count.total === 0) {
-    return `No encontré perfiles con ese criterio en ${baseLabel}. Si querés, puedo mirar la otra base.`;
+  const match = matchProfiles(db, filter);
+  const total = match.bases.reduce((sum, base) => sum + base.total, 0);
+  if (total === 0) {
+    return `No encontré perfiles. Criterio: ${match.criterio}.`;
   }
-  const bits = [`Hay ${count.total} ${count.total === 1 ? 'perfil' : 'perfiles'} en ${baseLabel}.`];
-  const seniority = Object.entries(count.bySeniority)
-    .filter(([key]) => key !== 'sin dato')
-    .slice(0, 3)
-    .map(([key, value]) => `${key} ${value}`);
-  if (seniority.length > 0) bits.push(`Seniority: ${seniority.join(', ')}.`);
-  const english = Object.entries(count.byEnglish)
-    .filter(([key]) => key !== 'sin dato' && key !== englishLabel('none'))
-    .slice(0, 3)
-    .map(([key, value]) => `${key} ${value}`);
-  if (english.length > 0) bits.push(`Inglés: ${english.join(', ')}.`);
+  const bits = [match.resumen];
   if (detail === 'names') {
-    const rows = searchCandidates(db, { ...filter, requireDataShare: requireDataClause }, maxNames);
+    const rows = searchCandidates(db, { skills: filter.skills, bases: filter.bases, requireDataShare: requireDataClause }, maxNames);
     if (rows.length === 0) {
       bits.push('Hay coincidencias, pero ninguna tiene la cláusula de datos como para nombrarla en la reunión.');
     } else {
@@ -176,8 +166,4 @@ export function answerFromCache(
     }
   }
   return bits.join(' ');
-}
-
-function baseName(base: BaseKey): string {
-  return base === 'historico' ? 'la base 2020-2021' : 'la base general';
 }

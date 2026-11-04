@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS candidates (
   data_share_ok INTEGER NOT NULL DEFAULT 0,
   skills_preview TEXT NOT NULL DEFAULT '',
   search_text TEXT NOT NULL DEFAULT '',
+  skill_tags TEXT NOT NULL DEFAULT '',
+  skill_text TEXT NOT NULL DEFAULT '',
   synced_at TEXT NOT NULL
 );
 
@@ -105,5 +107,15 @@ export function openDatabase(path: string): SqliteDatabase {
   db.exec('PRAGMA foreign_keys = ON;');
   if (path !== ':memory:') db.exec('PRAGMA journal_mode = WAL;');
   db.exec(SCHEMA);
+  migrate(db);
   return db;
+}
+
+/** Agrega columnas nuevas a caches viejos. Si faltan, hay que volver a correr npm run sync. */
+function migrate(db: SqliteDatabase): void {
+  const columns = new Set(
+    (db.prepare(`PRAGMA table_info(candidates)`).all() as Array<{ name: string }>).map((row) => row.name),
+  );
+  if (!columns.has('skill_tags')) db.exec(`ALTER TABLE candidates ADD COLUMN skill_tags TEXT NOT NULL DEFAULT ''`);
+  if (!columns.has('skill_text')) db.exec(`ALTER TABLE candidates ADD COLUMN skill_text TEXT NOT NULL DEFAULT ''`);
 }
