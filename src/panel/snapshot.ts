@@ -32,6 +32,17 @@ export interface PanelSnapshot {
   transcript: PanelTranscriptLine[];
   suggestions: PanelSuggestion[];
   suggestionNote: string;
+  /** Estado de la captura de audio; null si está apagada. */
+  audio?: {
+    provider: string;
+    tracks: number;
+    receiving: boolean;
+    segments: number;
+    transcribed: number;
+    queued: number;
+    lastLatencyMs: number | null;
+    lastError: string | null;
+  } | null;
 }
 
 export const SUGGESTION_NOTE =

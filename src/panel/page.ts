@@ -62,7 +62,8 @@ export function renderPanel(snapshot: PanelSnapshot, token: string): string {
       </section>
       <section>
         <h2>Transcripción</h2>
-        <p class="meta">Subtítulos en vivo, si alguien los prende. Es un intento: el DOM de Meet cambia seguido.</p>
+        <p class="meta">Audio de la reunión transcripto (fuente "audio"). Si el audio falla, usa los subtítulos de Meet (fuente "caption").</p>
+        <p id="audio" class="meta"></p>
         <ul id="transcript"></ul>
       </section>
       <section>
@@ -106,9 +107,16 @@ export function renderPanel(snapshot: PanelSnapshot, token: string): string {
       for (const line of snapshot.chat) {
         item(chat, line.sender + (line.addressed ? ' · te llamó' : ''), line.reply ? line.text + ' → ' + line.reply : line.text);
       }
+      const audio = snapshot.audio;
+      $('audio').textContent = audio
+        ? 'Audio: ' + audio.provider + ' · ' + audio.tracks + ' pista(s) · ' + (audio.receiving ? 'recibiendo' : 'sin señal') +
+          ' · ' + audio.transcribed + '/' + audio.segments + ' tramos' +
+          (audio.lastLatencyMs != null ? ' · demora ' + (audio.lastLatencyMs / 1000).toFixed(1) + ' s' : '') +
+          (audio.lastError ? ' · error: ' + audio.lastError : '')
+        : 'Audio apagado: solo subtítulos.';
       const transcript = $('transcript');
       transcript.replaceChildren();
-      if (!snapshot.transcript.length) item(transcript, '', 'Sin subtítulos todavía.');
+      if (!snapshot.transcript.length) item(transcript, '', 'Sin transcripción todavía.');
       for (const line of snapshot.transcript) item(transcript, line.speaker + ' · ' + line.source, line.text);
       const suggestions = $('suggestions');
       suggestions.replaceChildren();

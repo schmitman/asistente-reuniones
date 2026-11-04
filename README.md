@@ -9,7 +9,7 @@ El micrófono y la cámara quedan apagados. No publica nada en el chat salvo que
 1. Se une a un link de Meet por CLI o por el panel local. El perfil de Chrome queda en disco, así el login de Google se hace una sola vez.
 2. Lee el chat en el DOM y responde en el chat de la reunión.
 3. Contesta con un modelo OpenAI-compatible (OpenAI o xAI Grok) que consulta el cache de candidatos. Sin API key igual responde conteos simples.
-4. Si hay subtítulos prendidos, guarda una transcripción con hora y nombre. Es best-effort.
+4. Escucha el audio de la reunión y lo transcribe (xAI Grok Voice o faster-whisper local), con nombres sacados de los subtítulos cuando se puede. Si el audio falla, guarda los subtítulos como antes. Detalle en [docs/etapa2-audio.md](docs/etapa2-audio.md).
 5. Tiene un panel en localhost para ver estado, chat, transcripción y el lugar donde más adelante van a caer sugerencias proactivas.
 
 ## Requisitos
@@ -193,7 +193,7 @@ Los selectores del chat y de los subtítulos cambian con Meet. Si el bot entra p
 - Los selectores de Meet son frágiles. Una actualización de la interfaz puede dejar ciego el chat o los subtítulos sin romper el ingreso.
 - Automatizar el cliente de Meet está en una zona gris de los términos de Google. Esto no esquiva controles, no resuelve captchas y no entra si el anfitrión no admite. Revisá los términos con el equipo antes de usarlo seguido.
 - El headless suele chocar con el login de Google y a veces con la sala. En la VM, Xvfb más ventana real es el camino que anda.
-- Sin subtítulos activados no hay transcripción. Esta etapa no escucha audio.
+- La transcripción por audio no sabe nombres por sí sola: los toma de los subtítulos de Meet. Ver [docs/etapa2-audio.md](docs/etapa2-audio.md).
 - El sync es completo, no incremental. Las dos bases juntas son unos 50 mil registros: con la pausa de 220 ms son varios minutos.
 - `java` no cuenta como `javascript`, y `react` no cuenta como `react native`. Un término sí abarca una frase que lo contiene como palabra (`spring` encuentra `spring boot`).
 - Los conteos chicos pueden alcanzar para identificar a alguien. El modo `counts` no lo evita del todo.
@@ -201,7 +201,7 @@ Los selectores del chat y de los subtítulos cambian con Meet. Si el bot entra p
 
 ## Roadmap
 
-**Etapa 2. Audio y transcripción de verdad.** Capturar el audio que el navegador recibe de la reunión con PulseAudio (un sink del output de Chromium, no el micrófono de la sala) y mandarlo a un STT en streaming. La cámara y el micrófono del bot siguen apagados. La transcripción por subtítulos queda como respaldo.
+**Etapa 2. Audio y transcripción de verdad. Hecha.** El audio remoto se toma dentro de la página (sin PulseAudio), se corta en frases y se transcribe con xAI o con faster-whisper local. Los subtítulos quedan como pista de hablante y respaldo. Ver [docs/etapa2-audio.md](docs/etapa2-audio.md).
 
 **Etapa 3. Sugerencias proactivas.** Con la transcripción, proponer en el panel privado búsquedas o datos útiles para Mara. Ese canal no escribe en el chat de Meet. El chat sigue siendo solo bajo demanda.
 
@@ -224,6 +224,7 @@ npm run sync
 npm run ask -- "cuántos go hay"
 npm run serve
 npm run join -- https://meet.google.com/abc-defg-hij
+npm run test:audio -- --provider xai   # prueba de audio punta a punta, sin Meet
 ```
 
-Layout: `src/meet` entra a la sala, `src/chat` decide si le hablaron, `src/llm` llama al modelo, `src/airtable` y `src/query` son el cache, `src/panel` es el canal privado y `src/runtime/meeting.ts` une todo.
+Layout: `src/meet` entra a la sala, `src/chat` decide si le hablaron, `src/llm` llama al modelo, `src/airtable` y `src/query` son el cache, `src/audio` corta y transcribe el audio, `src/panel` es el canal privado y `src/runtime/meeting.ts` une todo.
