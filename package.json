@@ -15,7 +15,8 @@
     "serve": "tsx src/cli.ts serve",
     "ask": "tsx src/cli.ts ask",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:audio": "tsx scripts/audio-e2e.ts"
   },
   "dependencies": {
     "playwright": "^1.49.1",

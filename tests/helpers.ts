@@ -1,5 +1,5 @@
 import type { AppConfig } from '../src/config.js';
-import type { DomCaption, DomChatMessage, MeetController } from '../src/meet/controller.js';
+import type { AudioChunk, DomCaption, DomChatMessage, MeetController } from '../src/meet/controller.js';
 
 export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   return {
@@ -27,6 +27,16 @@ export function testConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     transcriptDir: 'data/transcripts',
     meetDebug: false,
     replyMaxChars: 480,
+    sttProvider: 'off',
+    sttApiKey: '',
+    sttBaseUrl: 'https://api.x.ai/v1',
+    sttLanguage: '',
+    sttDiarize: true,
+    sttPython: '.venv-stt/bin/python',
+    sttLocalModel: 'small',
+    sttMinSegmentMs: 4000,
+    sttMaxSegmentMs: 15_000,
+    sttSpeechRms: 0.01,
     ...overrides,
   };
 }
@@ -37,6 +47,11 @@ export class FakeMeet implements MeetController {
   caption: DomCaption | null = null;
   joinedUrl: string | null = null;
   closed = false;
+  audioListener: ((chunk: AudioChunk) => void) | null = null;
+
+  onAudio(listener: ((chunk: AudioChunk) => void) | null): void {
+    this.audioListener = listener;
+  }
 
   async join(url: string): Promise<void> {
     this.joinedUrl = url;

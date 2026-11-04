@@ -140,6 +140,17 @@ export function upsertCaption(
   return true;
 }
 
+export function insertTranscriptLine(
+  db: DatabaseSync,
+  input: { meetingId: string; ts: string; speaker: string; text: string; source: string },
+): void {
+  const text = input.text.replace(/\s+/g, ' ').trim();
+  if (!text) return;
+  db.prepare(
+    `INSERT INTO transcript_lines (meeting_id, ts, speaker, text, source) VALUES (?, ?, ?, ?, ?)`,
+  ).run(input.meetingId, input.ts, input.speaker.trim() || 'Participante', text, input.source);
+}
+
 export function writeMeetingJsonl(db: DatabaseSync, meetingId: string, filePath: string): void {
   const lines = [
     ...listTranscript(db, meetingId, 5000).map((line) => ({ ...line, source: line.source || 'caption' })),

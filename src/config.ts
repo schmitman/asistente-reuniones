@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
+import { chooseSttProvider, type SttChoice } from './audio/stt.js';
 
 export type ChatDetailLevel = 'counts' | 'names';
 
@@ -28,6 +29,18 @@ export interface AppConfig {
   transcriptDir: string;
   meetDebug: boolean;
   replyMaxChars: number;
+  /** Transcripción por audio. Resuelto: xai, local (faster-whisper) u off. */
+  sttProvider: 'xai' | 'local' | 'off';
+  sttApiKey: string;
+  sttBaseUrl: string;
+  /** Código de idioma para sesgar (es, en). Vacío: autodetecta. */
+  sttLanguage: string;
+  sttDiarize: boolean;
+  sttPython: string;
+  sttLocalModel: string;
+  sttMinSegmentMs: number;
+  sttMaxSegmentMs: number;
+  sttSpeechRms: number;
 }
 
 function loadDotEnv(file = '.env'): void {
@@ -125,5 +138,28 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     transcriptDir: pathValue(env.TRANSCRIPT_DIR, 'data/transcripts'),
     meetDebug: flag(env.MEET_DEBUG, false),
     replyMaxChars: 480,
+    ...sttConfig(env),
+  };
+}
+
+function sttConfig(env: NodeJS.ProcessEnv) {
+  const raw = (env.STT_PROVIDER || 'auto').trim().toLowerCase();
+  if (!['auto', 'xai', 'local', 'off'].includes(raw)) {
+    throw new Error('STT_PROVIDER tiene que ser auto, xai, local u off.');
+  }
+  const sttApiKey = (env.STT_API_KEY || env.XAI_API_KEY || '').trim();
+  const sttPython = pathValue(env.STT_PYTHON, '.venv-stt/bin/python');
+  const rms = Number(env.STT_SPEECH_RMS);
+  return {
+    sttProvider: chooseSttProvider({ choice: raw as SttChoice, xaiKey: sttApiKey, python: sttPython }),
+    sttApiKey,
+    sttBaseUrl: (env.STT_BASE_URL || 'https://api.x.ai/v1').trim().replace(/\/+$/, ''),
+    sttLanguage: (env.STT_LANGUAGE || '').trim().toLowerCase(),
+    sttDiarize: flag(env.STT_DIARIZE, true),
+    sttPython,
+    sttLocalModel: (env.STT_LOCAL_MODEL || 'small').trim() || 'small',
+    sttMinSegmentMs: Math.max(1000, intValue(env.STT_MIN_SEGMENT_MS, 4000)),
+    sttMaxSegmentMs: Math.max(3000, intValue(env.STT_MAX_SEGMENT_MS, 15_000)),
+    sttSpeechRms: Number.isFinite(rms) && rms > 0 ? rms : 0.01,
   };
 }

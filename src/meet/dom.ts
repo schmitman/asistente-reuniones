@@ -6,7 +6,11 @@ export function scrapeChatInPage(): DomChatMessage[] {
   const out: DomChatMessage[] = [];
   const seen = new Set<string>();
   const push = (id: string, sender: string, message: string) => {
-    const text = clean(message).replace(/\s*(?:keep)?\s*(?:Fijar mensaje|Pin message)$/i, '').trim();
+    const text = clean(message)
+      .replace(/\s*Coloca el cursor sobre un mensaje para fijarlo\.?\s*(?:keep|push_pin)?/gi, ' ')
+      .replace(/\s*Hover over a message to pin it\.?\s*(?:keep|push_pin)?/gi, ' ')
+      .replace(/\s*(?:keep|push_pin)?\s*(?:Fijar mensaje|Pin message)$/i, '')
+      .trim();
     if (!text) return;
     const key = id || `${sender}|${text}`;
     if (seen.has(key)) return;
@@ -42,7 +46,8 @@ export function scrapeChatInPage(): DomChatMessage[] {
 }
 
 export function scrapeCaptionInPage(): DomCaption | null {
-  const clean = (value: string | null | undefined): string => (value || '').replace(/\s+/g, ' ').trim();
+  const clean = (value: string | null | undefined): string =>
+    (value || '').replace(/\btranslate_cc\b/gi, ' ').replace(/\s+/g, ' ').trim();
   const root =
     document.querySelector('.a4cQT') ||
     document.querySelector('[jsname="dsyhDe"]') ||

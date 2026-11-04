@@ -12,3 +12,6 @@ playwright-report/
 test-results/
 .DS_Store
 *.log
+.venv-stt
+logs/
+__pycache__/

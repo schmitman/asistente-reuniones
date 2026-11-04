@@ -1,6 +1,9 @@
 import type { Page } from 'playwright';
 import type { AppConfig } from '../config.js';
-import type { DomCaption, DomChatMessage, MeetController } from './controller.js';
+import { decodePcm16Base64 } from '../audio/wav.js';
+import { AUDIO_BINDING, AUDIO_HOOK_SCRIPT } from './audioHook.js';
+import { cleanCaptionText, cleanChatText, isCaptionNoise } from './clean.js';
+import type { AudioChunk, DomCaption, DomChatMessage, MeetController } from './controller.js';
 import { scrapeCaptionInPage, scrapeChatInPage } from './dom.js';
 import {
   buttonWantsDeviceOff,
@@ -14,6 +17,9 @@ const LEAVE_SELECTOR = [
   '[aria-label*="Abandonar la llamada" i]',
   '[aria-label*="Salir de la llamada" i]',
 ].join(', ');
+
+const WAITING_TEXT =
+  /te agregue a la llamada|espera a que (?:un|el) anfitri|waiting for (?:the|a) host|will let you in soon|te dejará entrar|solicitando unirte|asking to join/i;
 
 const CHAT_INPUT = [
   'textarea[aria-label*="mensaje" i]',
@@ -31,6 +37,7 @@ export async function createPlaywrightMeet(config: AppConfig): Promise<MeetContr
 class PlaywrightMeetSession implements MeetController {
   private context: import('playwright').BrowserContext | null = null;
   private page: Page | null = null;
+  private audioListener: ((chunk: AudioChunk) => void) | null = null;
 
   constructor(private readonly config: AppConfig) {}
 
@@ -65,6 +72,13 @@ class PlaywrightMeetSession implements MeetController {
       throw explainLaunchError(error);
     }
     await this.context.addInitScript('globalThis.__name = globalThis.__name || ((f) => f);');
+    if (this.config.sttProvider !== 'off') {
+      await this.context.exposeBinding(AUDIO_BINDING, (_source, payload: { pcm?: string; tracks?: number }) => {
+        if (!this.audioListener || typeof payload?.pcm !== 'string') return;
+        this.audioListener({ pcm: decodePcm16Base64(payload.pcm), tracks: Number(payload.tracks) || 0 });
+      });
+      await this.context.addInitScript(AUDIO_HOOK_SCRIPT);
+    }
     this.page = this.context.pages()[0] ?? (await this.context.newPage());
     await this.page.evaluate('globalThis.__name = globalThis.__name || ((f) => f);').catch(() => {});
   }
@@ -88,7 +102,12 @@ class PlaywrightMeetSession implements MeetController {
     const page = this.requiredPage();
     await openChat(page);
     const input = page.locator(CHAT_INPUT).first();
-    await input.waitFor({ state: 'visible', timeout: 15_000 });
+    try {
+      await input.waitFor({ state: 'visible', timeout: 15_000 });
+    } catch (error) {
+      await page.screenshot({ path: 'logs/chat-fail.png' }).catch(() => undefined);
+      throw error;
+    }
     await input.click();
     try {
       await input.fill(text);
@@ -98,14 +117,30 @@ class PlaywrightMeetSession implements MeetController {
     await input.press('Enter');
   }
 
+  async inCall(): Promise<boolean> {
+    const page = this.requiredPage();
+    if (!/meet\.google\.com\/[a-z]{3}-[a-z]{4}-[a-z]{3}/i.test(page.url())) return false;
+    // count y no isVisible: Meet esconde la barra de controles cuando no hay movimiento.
+    return (await page.locator(LEAVE_SELECTOR).count().catch(() => 1)) > 0;
+  }
+
+  onAudio(listener: ((chunk: AudioChunk) => void) | null): void {
+    this.audioListener = listener;
+  }
+
   async scrapeChat(): Promise<DomChatMessage[]> {
     const page = this.requiredPage();
-    return page.evaluate(scrapeChatInPage);
+    const messages = await page.evaluate(scrapeChatInPage);
+    return messages
+      .map((message) => ({ ...message, text: cleanChatText(message.text) }))
+      .filter((message) => message.text);
   }
 
   async scrapeCaption(): Promise<DomCaption | null> {
     const page = this.requiredPage();
-    return page.evaluate(scrapeCaptionInPage);
+    const caption = await page.evaluate(scrapeCaptionInPage);
+    if (!caption || isCaptionNoise(caption.speaker, caption.text)) return null;
+    return { speaker: caption.speaker, text: cleanCaptionText(caption.text) };
   }
 
   async close(): Promise<void> {
@@ -190,7 +225,12 @@ async function waitUntilAdmitted(page: Page, timeoutMs: number): Promise<void> {
       console.log('[meet] pantalla al rechazar:\n' + txt.slice(0, 1500));
       throw new Error('El anfitrión no admitió al asistente o esta reunión no deja entrar.');
     }
-    if (await page.locator(LEAVE_SELECTOR).first().isVisible().catch(() => false)) return;
+    // Meet muestra el botón de colgar también en la sala de espera: chequeo que no siga esperando.
+    const waiting = await page
+      .getByText(WAITING_TEXT)
+      .count()
+      .catch(() => 0);
+    if (waiting === 0 && (await page.locator(LEAVE_SELECTOR).first().isVisible().catch(() => false))) return;
     await page.waitForTimeout(1000);
   }
   throw new Error('Se agotó la espera para que el anfitrión admita al asistente.');

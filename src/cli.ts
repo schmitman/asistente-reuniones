@@ -81,6 +81,11 @@ async function main(): Promise<void> {
     try {
       await runtime.start(url, consent);
       console.log(`En la reunión. Nombre: ${config.displayName}. Salí con Ctrl+C.`);
+      console.log(
+        config.sttProvider === 'off'
+          ? 'Transcripción por audio apagada: uso los subtítulos de Meet.'
+          : `Transcribiendo el audio con ${config.sttProvider === 'xai' ? 'xAI (Grok Voice)' : `faster-whisper local (${config.sttLocalModel})`}.`,
+      );
       await runtime.run();
     } finally {
       await stop();
@@ -92,8 +97,12 @@ async function main(): Promise<void> {
 
 function createLazyMeet(config: ReturnType<typeof loadConfig>): MeetController {
   let inner: MeetController | null = null;
+  let audioListener: Parameters<NonNullable<MeetController['onAudio']>>[0] = null;
   const ready = async (): Promise<MeetController> => {
-    if (!inner) inner = await createPlaywrightMeet(config);
+    if (!inner) {
+      inner = await createPlaywrightMeet(config);
+      inner.onAudio?.(audioListener);
+    }
     return inner;
   };
   return {
@@ -112,6 +121,13 @@ function createLazyMeet(config: ReturnType<typeof loadConfig>): MeetController {
     async close() {
       await inner?.close();
       inner = null;
+    },
+    async inCall() {
+      return inner?.inCall ? inner.inCall() : true;
+    },
+    onAudio(listener) {
+      audioListener = listener;
+      inner?.onAudio?.(listener);
     },
   };
 }

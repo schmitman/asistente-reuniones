@@ -1,6 +1,8 @@
 import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import type { AppConfig } from '../config.js';
+import { AudioTranscriber } from '../audio/pipeline.js';
+import { LocalWhisperStt, XaiStt, type SttProvider } from '../audio/stt.js';
 import { isOwnSender, parseAddressedCommand } from '../chat/parse.js';
 import { countStoredCandidates } from '../db/repo.js';
 import { answerQuestion } from '../llm/agent.js';
@@ -18,6 +20,7 @@ import {
   listSuggestions,
   listTranscript,
   markConsent,
+  insertTranscriptLine,
   upsertCaption,
   writeMeetingJsonl,
 } from '../transcript/store.js';
@@ -35,6 +38,9 @@ export class MeetingRuntime {
   private transcriptDirty = false;
   private lastFlush = 0;
   private readonly candidateCount: number;
+  private audio: AudioTranscriber | null = null;
+  private outOfCallPolls = 0;
+  private audioSnapshot: ReturnType<AudioTranscriber['status']> | null = null;
 
   constructor(
     private readonly db: DatabaseSync,
@@ -43,6 +49,7 @@ export class MeetingRuntime {
     private readonly answer: (question: string) => Promise<string> = (question) =>
       answerQuestion({ question, db, config, log: (message) => console.log(`[llm] ${message}`) }),
     private readonly now: () => number = Date.now,
+    private readonly createStt: () => SttProvider | null = () => defaultStt(config),
   ) {
     this.candidateCount = countStoredCandidates(db);
   }
@@ -70,6 +77,7 @@ export class MeetingRuntime {
       transcript: meetingId ? listTranscript(this.db, meetingId) : [],
       suggestions: listSuggestions(this.db, meetingId),
       suggestionNote: SUGGESTION_NOTE,
+      audio: this.audio?.status() ?? this.audioSnapshot,
     };
   }
 
@@ -105,6 +113,7 @@ export class MeetingRuntime {
     this.meetingUrl = meetUrl;
     this.seen.clear();
     this.consentPosted = false;
+    this.outOfCallPolls = 0;
     await this.meet.join(meetUrl);
     if (this.wasStopped()) return;
     const startedAt = new Date(this.now()).toISOString();
@@ -115,11 +124,18 @@ export class MeetingRuntime {
       code: meetCode(meetUrl),
       startedAt,
     });
+    this.startAudio();
     if (consent || this.config.postConsentOnJoin) {
       const notice = sanitizeOutgoing(this.config.consentMessage, this.config.replyMaxChars);
-      await this.meet.postMessage(notice);
-      markConsent(this.db, this.meetingId);
-      this.consentPosted = true;
+      try {
+        await this.meet.postMessage(notice);
+        markConsent(this.db, this.meetingId);
+        this.consentPosted = true;
+      } catch (error) {
+        // No tiro la sesión abajo por esto: queda el error en el panel y se puede reintentar.
+        this.lastError = `No pude publicar el aviso: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`;
+        console.log(`[meet] ${this.lastError}`);
+      }
     }
     const history = await this.meet.scrapeChat();
     for (const message of history) {
@@ -149,7 +165,9 @@ export class MeetingRuntime {
         if (!done) break;
       }
       const caption = await this.meet.scrapeCaption();
-      if (caption?.text) {
+      if (caption?.speaker) this.audio?.addHint(caption.speaker);
+      // Con audio sano, los subtítulos solo sirven de pista de quién habla.
+      if (caption?.text && !this.audio?.healthy()) {
         const changed = upsertCaption(this.db, {
           meetingId: this.meetingId,
           ts: new Date(this.now()).toISOString(),
@@ -159,6 +177,13 @@ export class MeetingRuntime {
         if (changed) this.transcriptDirty = true;
       }
       if (this.transcriptDirty && this.now() - this.lastFlush > 5000) this.flushTranscript();
+      if (this.meet.inCall) {
+        this.outOfCallPolls = (await this.meet.inCall()) ? 0 : this.outOfCallPolls + 1;
+        if (this.outOfCallPolls >= 5) {
+          console.log('[meet] ya no estoy en la llamada (terminó o me sacaron). Cierro la sesión.');
+          await this.stop();
+        }
+      }
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : String(error);
     }
@@ -166,12 +191,46 @@ export class MeetingRuntime {
 
   async stop(): Promise<void> {
     this.running = false;
+    this.meet.onAudio?.(null);
+    const audio = this.audio;
+    this.audio = null;
+    if (audio) {
+      await audio.close().catch(() => undefined);
+      this.audioSnapshot = audio.status();
+    }
     if (this.meetingId) {
       endMeeting(this.db, this.meetingId, new Date(this.now()).toISOString());
       this.flushTranscript();
     }
     await this.meet.close();
     if (this.status === 'live' || this.status === 'joining') this.status = 'left';
+  }
+
+  private startAudio(): void {
+    if (!this.meet.onAudio || this.config.sttProvider === 'off') return;
+    const stt = this.createStt();
+    if (!stt) return;
+    const meetingId = this.meetingId;
+    const transcriber = new AudioTranscriber({
+      stt,
+      sttOptions: { language: this.config.sttLanguage, diarize: this.config.sttDiarize },
+      segmenter: {
+        minMs: this.config.sttMinSegmentMs,
+        maxMs: this.config.sttMaxSegmentMs,
+        speechRms: this.config.sttSpeechRms,
+      },
+      now: this.now,
+      log: (message) => console.log(`[audio] ${message}`),
+      onLines: (lines) => {
+        if (!meetingId) return;
+        for (const line of lines) {
+          insertTranscriptLine(this.db, { meetingId, ...line, source: 'audio' });
+        }
+        this.transcriptDirty = true;
+      },
+    });
+    this.audio = transcriber;
+    this.meet.onAudio((chunk) => transcriber.pushAudio(chunk.pcm, chunk.tracks));
   }
 
   private wasStopped(): boolean {
@@ -245,6 +304,12 @@ export class MeetingRuntime {
       await delay(Math.min(200, end - this.now()));
     }
   }
+}
+
+function defaultStt(config: AppConfig): SttProvider | null {
+  if (config.sttProvider === 'xai' && config.sttApiKey) return new XaiStt(config.sttApiKey, config.sttBaseUrl);
+  if (config.sttProvider === 'local') return new LocalWhisperStt(config.sttPython, config.sttLocalModel);
+  return null;
 }
 
 function delay(ms: number): Promise<void> {
